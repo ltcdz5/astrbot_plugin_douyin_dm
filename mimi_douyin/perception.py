@@ -16,6 +16,7 @@ from .wire import ContentPart, Message, TextPart, ImageURLPart
 
 from .errors import BrowserError
 from .wire import insert_native_videos
+from . import image_perception
 
 
 TEXT_MODE = '转述为文本'
@@ -136,8 +137,12 @@ async def transcribe_video(owner, sources, *, audio_factory=None, visual_factory
         descriptions=list(dict.fromkeys(text for text in descriptions if text))
         if not paths and not image_files:
             raise BrowserError('没有取得可供转述的视频或图文原图。')
-        if len(image_files)>int(owner.config.get('max_post_images',30)):
+        if any(len(source.get('images', [])) > int(owner.config.get('max_post_images', 30)) for source in sources):
             raise BrowserError('图文图片数量超过设置，没有只看封面就声称读完。')
+        if image_files and not paths:
+            return await image_perception.transcribe_images(
+                owner, sources, provider_id, model, image_perception
+            )
         # The attachment helper validates the media directory and size before any read.
         insert_native_videos(messages, paths, owner.media_dir, float(owner.config.get('max_model_video_mb', 18)))
         # Keep media and its instructions in one user input, with text after video.
