@@ -23,12 +23,37 @@ try{
  assert.equal(result.peer.conversation_type,'group');assert.equal(result.peer.conversation_id,'group-123');
  assert.equal(result.direction_proven,true);assert.equal(result.items.find(x=>x.native_id==='one').sender_id,'111');
  assert.equal(result.items.find(x=>x.native_id==='two').sender_name,'Bob');assert.equal(result.items.find(x=>x.native_id==='mine').sender,'me');
+ await page.evaluate(()=>{const box=document.createElement('div');box.className='videoMessage';box.style.cssText='width:20px;height:20px';box.setAttribute('data-message-id','video-only');box.setAttribute('data-index','-1');document.querySelector('section > div').append(box);box.__reactProps$fixture={message:{clientId:'video-only',isMyMessage:false,sender:'111',senderInfo:{uid:'111',nickname:'Alice'},conversation_type:2,conversation_id:'group-123'}};});
+ const videoOnly=await page.evaluate(readChatDOM);
+ assert.equal(videoOnly.items.find(x=>x.native_id==='video-only').kind,'video');
  const list=await page.evaluate(readChatDOM,{conversations_only:true});assert.equal(list.conversations[0].name,'Test group');
  await page.evaluate(()=>{
    document.querySelector('[data-e2e="conversation-item"]').__reactProps$fixture.conversation.conversation_type=1;
    for(const item of document.querySelectorAll('[data-message-id]'))item.__reactProps$fixture.message.conversation_type=1;
  });
- assert.equal((await page.evaluate(readChatDOM)).peer.conversation_type,'private');
+ const privateResult=await page.evaluate(readChatDOM);
+ assert.equal(privateResult.peer.conversation_type,'private');
+ assert.equal(privateResult.direction_proven,true);
+ await page.evaluate(()=>{
+   for(const item of document.querySelectorAll('[data-message-id]')){
+     const props=Object.keys(item).find(k=>k.startsWith('__reactProps'));
+     if(props)delete item[props].message.isMyMessage;
+     item.className='privateMessage';
+   }
+ });
+ const privateWithoutDirectionFlags=await page.evaluate(readChatDOM);
+ assert.equal(privateWithoutDirectionFlags.direction_proven,true);
+ await page.evaluate(()=>{
+   document.querySelector('[data-e2e=\"conversation-item\"]').__reactProps$fixture.conversation.conversation_type=2;
+   for(const item of document.querySelectorAll('[data-message-id]')){
+     item.__reactProps$fixture.message.conversation_type=2;
+     delete item.__reactProps$fixture.message.isMyMessage;
+     item.className='unknownGroupMessage';
+   }
+ });
+ const unknownGroup=await page.evaluate(readChatDOM);
+ assert.equal(unknownGroup.peer.conversation_type,'group');
+ assert.equal(unknownGroup.direction_proven,false);
  await page.evaluate(()=>{
    class Conversation {get id(){return 'prototype-group';}get type(){return 2;}get name(){return 'Prototype group';}get unreadCount(){return 3;}get lastMessage(){return {clientId:'last-native'};}}
    document.querySelector('[data-e2e="conversation-item"]').__reactProps$fixture={conversation:new Conversation(),onMouseDown(){}};
@@ -37,8 +62,7 @@ try{
      const stableID=item.dataset.messageId;
      Object.setPrototypeOf(msg,{get clientId(){return 'native-'+stableID;}});
      item.removeAttribute('data-message-id');
-     item.__reactProps$fixture.isMyMessage=true;
-     if(msg.isMyMessage)item.classList.add('isFromMe');
+     if(stableID==='mine'){msg.isMyMessage=true;item.classList.add('isFromMe');}
      if(stableID==='one'){
        delete msg.senderInfo.nickname;
        const name=document.createElement('span');name.className='MessageBoxMessageTitleavatarName';name.textContent='Visible member';item.append(name);

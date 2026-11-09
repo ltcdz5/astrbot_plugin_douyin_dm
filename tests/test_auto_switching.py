@@ -2,21 +2,13 @@
 import asyncio
 import copy
 import sys
-import importlib
-from types import ModuleType
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
 
-# Load the checkout as a package, independent of its directory name.
-package_name='_switching_test_plugin'
-package=ModuleType(package_name)
-package.__path__=[str(Path(__file__).resolve().parents[1])]
-sys.modules[package_name]=package
-errors=importlib.import_module(package_name+'.mimi_douyin.errors')
-switching=importlib.import_module(package_name+'.conversation_switching')
-ConversationSwitching=switching.ConversationSwitching
-BrowserError=errors.BrowserError
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from astrbot_plugin_douyin_dm.conversation_switching import ConversationSwitching
+from astrbot_plugin_douyin_dm.bridge import BrowserError
 
 
 def item(native,text,sender='peer'):
@@ -35,7 +27,7 @@ def fixture():
         if action=='conversations':return {'conversations':copy.deepcopy(rows)}
         if action=='select_conversation':state['active']=args['conversation_id']
         return copy.deepcopy(snapshots[state['active']])
-    owner=NS(config={'conversation_hold_seconds':0,'private_whitelist':['private'],'group_whitelist':['group'],'group_chat_enabled':True},
+    owner=NS(config={'private_whitelist':['private'],'group_whitelist':['group'],'group_chat_enabled':True},
         browser=NS(call=call),ledger=NS(observe=Mock(),put=Mock()),job_lock=asyncio.Lock(),current_event=None,
         binding={'peer':snapshots['p']['peer']},_check_peer=Mock(),_check_whitelist=Mock(),_check_profile=Mock())
     return owner,rows,snapshots,calls,state

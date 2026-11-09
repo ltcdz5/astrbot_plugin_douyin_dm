@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
@@ -21,12 +22,20 @@ def item(key,sender,text,kind='text'):
 
 def setup(directory,mode='仅@机器人'):
     owner=object.__new__(MimiDouyinDM);owner.ledger=Ledger(Path(directory)/'messages.db')
-    owner.config={'provider_id':'example-judge','group_reply_mode':mode,'group_conversation':{'reply_probability':1}}
+    owner.config={'provider_id':'example-judge','group_reply_mode':mode,'group_conversation':{'reply_probability':1,'video_reply_probability':1}}
     owner.context=NS(llm_generate=AsyncMock(return_value=NS(completion_text='TOPIC')),get_event_queue=lambda:asyncio.Queue())
     owner.platform=DouyinPlatform(owner);owner.job_lock=asyncio.Lock();owner._process_items=AsyncMock()
     owner.group_conversation=GroupConversation(owner)
     peer=dict(key='example-group',conversation_type='group',name='Example group',self_user_id='bot',self_user_name='ExampleBot')
     return owner,peer
+
+
+def test_empty_group_configuration_uses_defaults():
+    owner=object.__new__(MimiDouyinDM);owner.config={'group_conversation':None}
+    owner.group_conversation=GroupConversation(owner)
+    settings=owner.group_conversation.settings
+    assert settings['video_reply_probability']==0.1
+    assert settings['reply_probability']==0.1
 
 
 def test_unmentioned_messages_are_available_to_later_mention_with_speaker_identity():
@@ -120,6 +129,42 @@ def test_context_retention_and_custom_prompts_apply_without_persona_changes():
         assert request.extra_user_content_parts[0].text=='Other memory context'
         assert 'Custom reply style' in request.extra_user_content_parts[-1].text
         owner.config['group_conversation']['context_enabled']=False;assert engine.recent(peer,[])==[]
+        owner.ledger.close()
+    with tempfile.TemporaryDirectory() as directory:asyncio.run(check(directory))
+
+
+def test_unmentioned_group_video_is_processed_separately_from_mention_replies():
+    async def check(directory):
+        owner,peer=setup(directory,'仅@机器人')
+        owner.config['group_conversation']['reference_previous_media']=False
+        video=item('video-unmentioned','Alice','Shared video','video')
+        await owner._handle([video],peer)
+        assert owner._process_items.await_count==1
+        assert owner._process_items.call_args.args[0]==[video]
+        assert owner._process_items.call_args.kwargs['group_context']['mentioned_self'] is False
+        owner._process_items.reset_mock()
+        await owner._handle([item('text-unmentioned','Bob','ordinary group text')],peer)
+        owner._process_items.assert_not_called()
+        await owner._handle([item('text-mentioned','Bob','@ExampleBot answer this')],peer)
+        assert owner._process_items.await_count==1
+        assert owner._process_items.call_args.kwargs['group_context']['mentioned_self'] is True
+        owner.ledger.close()
+    with tempfile.TemporaryDirectory() as directory:asyncio.run(check(directory))
+
+
+def test_unmentioned_group_video_uses_probability_but_mention_bypasses_it():
+    async def check(directory):
+        owner,peer=setup(directory,'仅@机器人')
+        owner.config['group_conversation'].update(video_reply_probability=0)
+        video=item('video-auto','Alice','Shared video','video')
+        with patch('astrbot_plugin_douyin_dm.main.random.random',return_value=0.5):
+            await owner._handle([video],peer)
+        owner._process_items.assert_not_called()
+        mention=item('video-mentioned','Alice','@ExampleBot watch this','video')
+        with patch('astrbot_plugin_douyin_dm.main.random.random',return_value=0.999):
+            await owner._handle([mention],peer)
+        owner._process_items.assert_awaited_once()
+        assert owner._process_items.call_args.kwargs['group_context']['mentioned_self'] is True
         owner.ledger.close()
     with tempfile.TemporaryDirectory() as directory:asyncio.run(check(directory))
 
