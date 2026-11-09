@@ -79,7 +79,8 @@
 <label for="group-context-messages">最多参考多少条消息</label><input id="group-context-messages" type="number" min="1" max="100">
 <label for="group-context-minutes">保留最近观察到消息的时间（分钟）</label><input id="group-context-minutes" type="number" min="1" max="1440">
 <label for="group-context-chars">上下文总字数预算</label><input id="group-context-chars" type="number" min="1000" max="50000">
-<label for="group-probability">非 @ 消息采样概率（%）</label><input id="group-probability" type="number" min="0" max="100" step="1">
+<label for="group-probability">非 @ 文字消息采样概率（%）</label><input id="group-probability" type="number" min="0" max="100" step="1">
+      <label for="group-video-probability">非 @ 视频自动回复概率（%）</label><input id="group-video-probability" type="number" min="0" max="100" step="1">
 <p class="detail">10% 表示约十分之一的候选消息进入相关性判断，并非十分之一必定回复。被 @ 的回应不受此概率限制。</p>
 <label for="group-cooldown">主动接话冷却（秒）</label><input id="group-cooldown" type="number" min="0" max="3600">
 <details><summary>判断模型与自定义提示词</summary>

@@ -53,6 +53,7 @@
     $('group-reference-media').checked=settings.reference_previous_media!==false;
     for(const [id,key,fallback] of [['group-context-messages','context_messages',20],['group-context-minutes','context_minutes',30],['group-context-chars','max_context_chars',12000],['group-cooldown','reply_cooldown_seconds',60],['group-judge-timeout','judge_timeout_seconds',20]])$(id).value=settings[key]??fallback;
     $('group-probability').value=(settings.reply_probability??0.1)*100;
+    $('group-video-probability').value=(settings.video_reply_probability??0.1)*100;
     $('group-judge-provider').value=settings.judge_provider_id||'';
     $('group-judge-prompt').value=settings.judge_prompt||'';
     $('group-reply-prompt').value=settings.reply_prompt||'';
@@ -60,7 +61,7 @@
   $('save-group-settings').addEventListener('click',()=>run(async()=>{const result=unwrap(await bridge.apiPost('group/settings',{
     context_enabled:$('group-context-enabled').checked,reference_previous_media:$('group-reference-media').checked,
     context_messages:$('group-context-messages').value,context_minutes:$('group-context-minutes').value,max_context_chars:$('group-context-chars').value,
-    reply_probability:Number($('group-probability').value)/100,reply_cooldown_seconds:$('group-cooldown').value,
+    reply_probability:Number($('group-probability').value)/100,video_reply_probability:Number($('group-video-probability').value)/100,reply_cooldown_seconds:$('group-cooldown').value,
     judge_provider_id:$('group-judge-provider').value,judge_timeout_seconds:$('group-judge-timeout').value,
     judge_prompt:$('group-judge-prompt').value,reply_prompt:$('group-reply-prompt').value}));
     loadGroupSettings(result.settings);notice('群聊设置已保存，下一次接话生效。');}));
