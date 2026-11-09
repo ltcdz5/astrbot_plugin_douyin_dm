@@ -1,5 +1,6 @@
 """AstrBot permissions and activity evidence; no independent timers."""
 import json
+from astrbot.api import logger
 from .bridge import BrowserError
 from .watch_memory import remember_video
 from .mimi_douyin.activities import ActivityEngine
@@ -37,7 +38,12 @@ async def watch(owner,event,url=''):
         memory=None
         if owner.config.get('remember_videos',False):
             try:memory=await remember_video(owner,_MemoryEvent(event,record['transcript']),[result['source']],record['watched_at'])
-            except BrowserError:memory={'state':'local_activity_saved'}
+            except BrowserError as exc:
+                logger.warning('[与bot刷抖音] 观看回忆未写入：%s',str(exc)[:200])
+                memory={'state':'local_activity_saved','reason':str(exc)[:160]}
+            except Exception as exc:
+                logger.warning('[与bot刷抖音] 观看回忆异常：%s: %s',type(exc).__name__,str(exc)[:200])
+                memory={'state':'failed','reason':type(exc).__name__}
         return json.dumps({'verified':True,'post_id':record['post_id'],'url':record['url'],'kind':record['kind'],
             'observation':text,'memory':memory,'limit':'只按实际转述聊天；未执行评论。'},ensure_ascii=False)
 
@@ -47,7 +53,7 @@ async def comment(owner,event,url,text):
         await owner._open_browser()
         receipt=await owner.activities.comment(url,text)
         facts=event.get_extra('activity_report_tools',[])
-        facts.append({'tool':'douyin_comment_watched','ok':receipt.get('state')=='sent','arguments':{'url':url},
+        facts.append({'tool':'douyin_comment_watched','ok':receipt.get('state')=='sent' and bool(receipt.get('comment_id')),'arguments':{'url':url},
                       'result_excerpt':json.dumps(receipt,ensure_ascii=False),'limit':'只有 state=sent 且有 comment_id 才确认发表评论。'})
         event.set_extra('activity_report_tools',facts[-8:])
         return json.dumps(receipt,ensure_ascii=False)

@@ -51,6 +51,24 @@ class ConversationContext:
 
     def links(self):
         result = [dict(row) for row in self.owner.config.get('conversation_links', [])]
+        if self.owner.config.get('group_share_qq_memory', False):
+            privs = [f'mimi-douyin:FriendMessage:{k}' for k in self.owner.config.get('private_whitelist', []) if k]
+            grps = [f'mimi-douyin:GroupMessage:{k}' for k in self.owner.config.get('group_whitelist', []) if k]
+            for g in grps:
+                for p in privs:
+                    if not any(
+                        (r.get('source_session') == g and r.get('target_session') == p) or
+                        (r.get('source_session') == p and r.get('target_session') == g and r.get('bidirectional', True))
+                        for r in result
+                    ):
+                        result.append({
+                            'source_session': g,
+                            'target_session': p,
+                            'target_conversation_id': '',
+                            'bidirectional': True,
+                            'share_memory': True,
+                            'auto': True,
+                        })
         memory = self.memory()
         if memory:
             existing = memory.config_manager.get('access_control.shared_private_sessions', '')
@@ -83,8 +101,9 @@ class ConversationContext:
         source_kind = session_kind(source)
         if source_kind=='GroupMessage' and not self.owner.config.get('group_share_qq_memory',False):
             raise BrowserError('请先开启“群聊读取所选 QQ 对话与记忆”，再选择群聊要参考的对话。')
-        cross_private=source_kind=='GroupMessage' and session_kind(target)=='FriendMessage'
-        if session_kind(target) != source_kind and not (cross_private and self.owner.config.get('group_share_qq_memory',False)):
+        # 私聊与群聊都属于同一位甲，双向关联都应允许；由总开关控制。
+        cross_kind=session_kind(target) != source_kind
+        if cross_kind and not self.owner.config.get('group_share_qq_memory',False):
             raise BrowserError('跨私聊与群聊的共享默认关闭；需要管理员明确开启“群聊读取所选 QQ 对话与记忆”。')
         if target == source: raise BrowserError('不能关联当前会话自身。')
         cid = str(body.get('target_conversation_id') or '').strip()
@@ -97,9 +116,10 @@ class ConversationContext:
             if type(body.get(flag, True if flag == 'bidirectional' else False)) is not bool:
                 raise BrowserError('关联开关应为布尔值。')
         row = {'source_session': source, 'target_session': target, 'target_conversation_id': cid,
-               'bidirectional': False if cross_private else body.get('bidirectional', True), 'share_memory': body.get('share_memory', False)}
+               'bidirectional': body.get('bidirectional', True), 'share_memory': body.get('share_memory', False)}
         if source_kind=='GroupMessage' and row['share_memory'] and not self.owner.config.get('group_share_qq_memory',False):
             raise BrowserError('请先开启“群聊读取所选 QQ 对话与记忆”；群聊长期记忆关联为只读。')
+        if source_kind=='GroupMessage':row['bidirectional']=False
         memory = self.memory()
         if row['share_memory'] and (not memory or (source_kind=='FriendMessage' and (
                 not hasattr(memory.config_manager, '_raw_config') or memory.config_manager.get('access_control.shared_private_sessions',None) is None))):
@@ -162,10 +182,10 @@ class ConversationContext:
         sources = []; budget = options['max_total_chars']; visited = set()
         for row in matches:
             source_kind=session_kind(row['source_session']);target_kind=session_kind(row['target_session'])
+            # Persisted group links remain read-only even if older settings enabled reverse sharing.
+            if source_kind=='GroupMessage' and session!=row['source_session']:continue
+            if source_kind!=target_kind and not self.owner.config.get('group_share_qq_memory',False):continue
             if source_kind=='GroupMessage' and not self.owner.config.get('group_share_qq_memory',False):continue
-            if source_kind!=target_kind:
-                if source_kind!='GroupMessage' or not self.owner.config.get('group_share_qq_memory',False):continue
-                if session!=row['source_session']:continue
             outgoing = session == row['source_session']
             other = row['target_session'] if outgoing else row['source_session']
             cid = row.get('target_conversation_id') if outgoing else None
@@ -191,7 +211,25 @@ class ConversationContext:
                 if not text: break
                 eligible.append({'speaker': message['role'], 'text': text}); budget -= len(text)
                 if len(eligible) >= options['max_messages'] or budget <= 0: break
-            if eligible: sources.append({'channel': other.split(':')[0], 'conversation': list(reversed(eligible))})
+            channel_label = '抖音群聊' if session_kind(other) == 'GroupMessage' else '抖音私聊' if other.startswith('mimi-douyin:') else other.split(':')[0]
+            if eligible: sources.append({'channel': channel_label, 'conversation': list(reversed(eligible))})
+            if session_kind(other) == 'GroupMessage' and other.startswith('mimi-douyin:') and budget > 0:
+                group_key = other.split(':', 2)[2]
+                grp_data = self.owner.ledger.get('group-context:' + group_key, {'messages': []})
+                grp_msgs = []
+                for m in reversed(grp_data.get('messages', [])):
+                    if m.get('kind') in ('video','note') and not m.get('media_observation'):continue
+                    txt = str(m.get('text') or '').strip()
+                    if m.get('media_observation'):
+                        txt = (txt + ' [已读作品：' + str(m['media_observation'])[:260] + ']').strip()
+                    if not txt: continue
+                    txt = txt[:min(options['max_chars_per_message'], budget)]
+                    if not txt: break
+                    grp_msgs.append({'speaker': m.get('sender_name') or m.get('role') or '群成员', 'text': txt})
+                    budget -= len(txt)
+                    if len(grp_msgs) >= options['max_messages'] or budget <= 0: break
+                if grp_msgs:
+                    sources.append({'channel': '抖音群聊近期消息账本', 'conversation': list(reversed(grp_msgs))})
             if outgoing and source_kind=='GroupMessage' and row.get('share_memory') and self.owner.config.get('group_share_qq_memory',False):
                 memory=self.memory()
                 if memory:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from .mimi_douyin.errors import BrowserError
+from .bridge import BrowserError
 
 
 class ConversationSwitching:
@@ -22,7 +22,7 @@ class ConversationSwitching:
         if group and not self.owner.config.get('group_chat_enabled',True):return False
         return row['key'] in self.owner.config.get('group_whitelist' if group else 'private_whitelist',[])
 
-    async def poll(self,capture=None):
+    async def poll(self):
         owner=self.owner
         if getattr(owner,'current_event',None) or owner.job_lock.locked():return None
         listing=await owner.browser.call('conversations')
@@ -45,14 +45,23 @@ class ConversationSwitching:
         active=(current.get('peer') or {}).get('conversation_id') if current.get('ready') else None
         active_row=next((row for row in candidates if row['conversation_id']==active),None)
         now=time.monotonic()
-        holding=bool(active and self.hold_until.get(active,0)>now)
-        if holding and not active_row:return None
-        # Finish the initial active batch, then let the oldest waiting chat run.
+        holding = bool(active and self.hold_until.get(active, 0) > now)
+        if holding and not active_row:
+            return None
+        # Finish the initial active batch (e.g. video then @), but once
+        # its fixed hold expires, use least-recently-served routing.
         if active_row and (holding or active not in self.served):
-            row=active_row
+            row = active_row
         else:
-            row=min(candidates,key=lambda item:self.served.get(item['conversation_id'],float('-inf')))
+            row = min(
+                candidates,
+                key=lambda item: self.served.get(
+                    item['conversation_id'], float('-inf')
+                ),
+            )
         cid=row['conversation_id'];previous=self.frontiers[cid]
+        self.served[cid]=time.monotonic()
+        current=await owner.browser.call('snapshot')
         if not current.get('ready') or current['peer'].get('conversation_id')!=cid:
             current=await owner.browser.call('select_conversation',{'conversation_id':cid})
         if not current.get('ready') or current['peer'].get('conversation_id')!=cid:
@@ -71,23 +80,21 @@ class ConversationSwitching:
             fresh=[items[ids.index(row['latest_message_id'])]]
         owner.binding={'peer':peer,'bound_at':time.time(),'automatic':True}
         owner.ledger.put('binding',owner.binding)
-        fresh=[item for item in fresh if item['sender']=='peer']
-        if capture:
-            fresh=[item if item.get('native_id') else {**item,'_delivery_key':f'switch:{cid}:{previous}:{index}'}
-                for index,item in enumerate(fresh)]
-        if fresh and capture:capture(peer,fresh)
         owner.ledger.observe(peer['key'],items,prime=True)
         self.frontiers[cid]=items[-1].get('native_id') or row['latest_message_id']
-        self.served[cid]=now
-        incoming=fresh
-        if incoming and (cid!=active or cid not in self.hold_until):
-            # Optional override: zero disables holding; absent config works as-is.
-            configured=float(owner.config.get('conversation_hold_seconds',3))
-            # Cover the monitor's merge + poll cadence, with 1s scheduling slack.
-            cadence=max(2,float(owner.config.get('poll_seconds',4)))+max(0,min(15,float(owner.config.get('merge_seconds',3))))+1
-            duration=min(15,max(configured,cadence)) if configured>0 else 0
-            # Same-visit follow-ups never renew this fixed deadline.
-            self.hold_until={cid:time.monotonic()+duration}
+        incoming=[item for item in fresh if item['sender']=='peer']
+        if incoming and (cid != active or cid not in self.hold_until):
+            configured = float(owner.config.get('conversation_hold_seconds', 3))
+            # Explicit zero disables the grace period. Otherwise cover the
+            # monitor sleep and merge window, rather than expiring before
+            # the next normal poll can capture a following mention.
+            cadence = (
+                max(0, float(owner.config.get('poll_seconds', 4)))
+                + max(0, float(owner.config.get('merge_seconds', 3)))
+            )
+            duration = min(15, max(configured, cadence)) if configured > 0 else 0
+            # A follow-up on the same visit never renews this deadline.
+            self.hold_until = {cid: time.monotonic() + duration}
         return current,incoming
 
     def observed(self,snapshot):
