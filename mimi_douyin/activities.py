@@ -57,7 +57,8 @@ class ActivityEngine:
         if not text or len(text)>200:raise BrowserError('评论正文应为 1～200 字。')
         key='comment:'+post_id[1]+':'+hashlib.sha256(text.encode()).hexdigest()
         previous=owner.ledger.get(key)
-        if previous:return {**previous,'already_submitted':True}
+        if previous and not (previous.get('state')=='failed' and previous.get('receipt')=='prepare_failed'):
+            return {**previous,'already_submitted':True}
         owner.ledger.put(key,{'state':'unknown','post_id':post_id[1],'text':text,'submitted_at':time.time()})
         try:receipt=await owner.browser.call('comment',{'url':url,'text':text},timeout=90)
         except Exception:

@@ -30,7 +30,7 @@ def insert_native_videos(messages,paths,media_dir,max_mb):
     parts=[]
     for value in paths:
         file=Path(value).resolve()
-        if not file.is_relative_to(Path(media_dir).resolve()) or not file.is_file() or file.stat().st_size>max_mb*1024*1024:
+        if not file.is_relative_to(Path(media_dir).resolve()) or not file.is_file() or (max_mb>0 and file.stat().st_size>max_mb*1024*1024):
             raise BrowserError('视频输入文件不符合当前设置。')
         data='data:video/mp4;base64,'+base64.b64encode(file.read_bytes()).decode('ascii')
         parts.append(VideoURLPart(video_url={'url':data}))
