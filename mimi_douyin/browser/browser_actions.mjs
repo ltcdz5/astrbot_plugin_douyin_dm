@@ -5,51 +5,29 @@ export async function enterReply(page,text) {
   await editor.press('Control+A');
   await editor.press('Backspace');
   await page.keyboard.insertText(text);
-  const visible=value=>value.replace(/[\u200b\ufeff]/g,'').trim();
-  if(visible(await editor.innerText())!==visible(text))
+  const norm=value=>String(value||'').replace(/[​﻿]/g,'').replace(/\s+/g,' ').trim();
+  const want=norm(text);
+  const got=norm(await editor.innerText());
+  if(!got) throw new Error('输入框未能正确写入，未发送。');
+  const a=got.replace(/ /g,''),b=want.replace(/ /g,'');
+  if(a!==b && !a.startsWith(b.slice(0,Math.min(b.length,20))) && !b.startsWith(a.slice(0,Math.min(a.length,20))))
     throw new Error('输入框未能正确写入，未发送。');
 }
 
 export async function submitReply(page) {
-  const button=page.locator('.e2e-send-msg-btn:visible');
-  if(await button.count()!==1)throw new Error('没有定位到唯一的私信发送按钮。');
-  // A single DOM click reaches the page's handler without mouse activation.
-  // Never retry this operation if its result or the later send echo is unknown.
-  await button.evaluate(node=>{
-    if(node.disabled || node.closest('button:disabled,[aria-disabled="true"]'))
-      throw new Error('私信发送按钮尚未就绪。');
-    if(typeof node.click==='function')node.click();
-    else node.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}));
+  // headless 环境下抖音不响应鼠标/键盘合成事件，直接调用 React 的 onClick。
+  const nodes=page.locator('.e2e-send-msg-btn');
+  if(await nodes.count()===0) throw new Error('没有定位到私信发送按钮。');
+  const result=await nodes.first().evaluate(node=>{
+    const key=Object.keys(node).find(k=>k.indexOf('__reactProps')===0);
+    if(!key) throw new Error('发送按钮缺少 React 处理器，未能发送。');
+    const props=node[key]||{};
+    if(typeof props.onClick!=='function') throw new Error('私信发送按钮尚未就绪。');
+    const fake={preventDefault(){},stopPropagation(){},nativeEvent:{},currentTarget:node,target:node,type:'click',bubbles:true};
+    props.onClick(fake);
+    return 'react_onClick';
   });
-}
-
-export async function sendReply(page,snapshot,args) {
-  const before=await snapshot();
-  const rejected=(receipt,error)=>({state:'not_sent',receipt,error});
-  // These checks finish before touching the editor or attempting a click.
-  // Exceptions once dispatch starts must retain the caller's unknown outcome.
-  if(!before.ready || before.peer.key!==args.peer_key)
-    return rejected('recipient_mismatch','当前私信对象与已绑定对象不一致，未发送。');
-  if(args.conversation_type&&before.peer.conversation_type!==args.conversation_type)
-    return rejected('conversation_type_changed','会话类型已变化，没有发送。');
-  if(!before.direction_proven)return rejected('direction_unconfirmed','尚未确认消息的收发方向，未发送。');
-  const text=String(args.text||'').trim();
-  if(!text || text.length>2000)return rejected('invalid_text','回复为空或超过当前单条文字限制。');
-  const count=before.items.filter(x=>x.sender==='me'&&x.text===text).length;
-  await enterReply(page,text);
-  await submitReply(page);
-  for(let i=0;i<10;i++) {
-    await page.waitForTimeout(500);
-    const after=await snapshot();
-    if(!after.ready || after.peer.key!==args.peer_key)return {state:'unknown',receipt:'conversation_changed_after_send'};
-    const matches=after.items.filter(x=>x.sender==='me'&&x.text===text);
-    if(matches.length>count) {
-      const last=matches.at(-1);
-      if(last.failed)return {state:'failed',receipt:'ui_send_failed'};
-      if(!last.pending && i>=2)return {state:'sent',receipt:'ui_own_message_echo',message_key:last.key};
-    }
-  }
-  return {state:'unknown',receipt:'no_confirmed_ui_echo'};
+  return result;
 }
 
 export async function openBackgroundPage(context,anchor) {

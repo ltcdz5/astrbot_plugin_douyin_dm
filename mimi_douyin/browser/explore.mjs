@@ -1,6 +1,6 @@
 import {openBackgroundPage} from './browser_actions.mjs';
 import {readPost} from './post_media.mjs';
-import {getCommentEditor,getCommentSubmit,captureEmptyCommentControls} from './comment_ui.mjs';
+import {getCommentEditor,getCommentSubmit,fillComment} from './comment_ui.mjs';
 
 export async function browsePost(args,environment) {
   if(args.url)return await readPost({url:args.url,info_only:!!args.info_only},environment);
@@ -72,6 +72,7 @@ export async function publishComment(args,environment) {
   if(source.protocol!=='https:'||!siteHost(source.hostname)||source.username||source.password||!postID||!text||text.length>200)
     throw new Error('评论需要有效作品链接和 1～200 字正文。');
   const tab=await openBackgroundPage(context,page);
+  let dispatched=false;
   try {
     await tab.goto(source.href,{waitUntil:'domcontentloaded',timeout:45000});
     if(/验证码|安全验证/.test(await tab.title()))throw new Error('评论页要求账号验证，请先手动完成。');
@@ -80,10 +81,7 @@ export async function publishComment(args,environment) {
       ||target.pathname.match(/^\/(?:video|note)\/(\d{12,24})\/?$/)?.[1]!==postID)
       throw new Error('评论目标已改变，未提交。');
     const editor=await getCommentEditor(tab);
-    await editor.focus();await editor.press('Control+A');await editor.press('Backspace');await captureEmptyCommentControls(tab);await tab.keyboard.insertText(text);
-    await tab.waitForTimeout(100);
-    const entered=await editor.evaluate(node=>node.value??node.innerText);
-    if(entered.replace(/[\u200b\ufeff]/g,'').trim()!==text)throw new Error('评论输入不一致，未提交。');
+    const prepared=await fillComment(tab,editor,text);
     const submit=await getCommentSubmit(tab);
     const receipt=tab.waitForResponse(response=>{
       try {
@@ -91,12 +89,13 @@ export async function publishComment(args,environment) {
         if(!siteHost(endpoint.hostname)||!endpoint.pathname.endsWith('/aweme/v1/web/comment/publish/')
           ||response.request().method()!=='POST')return false;
         const params=new URLSearchParams(response.request().postData()||'');
-        return params.get('aweme_id')===postID&&params.get('text')===text;
+        return params.get('aweme_id')===postID&&params.get('text')===prepared.text;
       } catch {return false;}
     },{timeout:15000}).then(async response=>{
       try {return await response.json();} catch {return null;}
     }).catch(()=>null);
     try {
+      dispatched=true;
       await submit.evaluate(button=>{
         if(button.disabled||button.getAttribute('aria-disabled')==='true')throw new Error('评论发送按钮不可用。');
         button.click();
@@ -112,5 +111,8 @@ export async function publishComment(args,environment) {
     if(result&&Number.isFinite(Number(result.status_code))&&Number(result.status_code)!==0)
       return {state:'failed',post_id:postID,receipt:'server_rejection'};
     return {state:'unknown',post_id:postID,receipt:'no_confirmed_comment_id'};
+  } catch(error) {
+    if(dispatched)throw error;
+    return {state:'failed',post_id:postID,receipt:'prepare_failed',reason:String(error.message||error).slice(0,500)};
   } finally {await tab.close().catch(()=>{});}
 }

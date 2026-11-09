@@ -1,7 +1,14 @@
 export function readChatDOM({debug=false,conversations_only=false}={}) {
+    const ROLE_TITLE_RE=/(?:^|[\s\[【(（·|｜])(?:群主|管理员|超级管理员|房管|版主|主持人|群助理|owner|admin|moderator)(?=$|[\s\]】)）·|｜])/ig;
+    const cleanMemberName=value=>{
+      const raw=String(value||'').replace(/[\u200b\ufeff]/g,'').trim();
+      const titles=[...raw.matchAll(ROLE_TITLE_RE)].map(match=>match[0].replace(/^[\s\[【(（·|｜]+|[\s\]】)）·|｜]+$/g,'')).filter(Boolean);
+      const name=raw.replace(ROLE_TITLE_RE,' ').replace(/[\[【(（].*?[\]】)）]/g,' ').replace(/\s+/g,' ').trim();
+      return {name:name||raw,role_title:[...new Set(titles)].join('、')};
+    };
     const visible=el=>el && el.getBoundingClientRect().width>10 && el.getBoundingClientRect().height>8;
     const factsFor=node=>{
-      const facts={video_ids:[],links:[],message_ids:[],conversation_ids:[],conversation_types:[],conversation_names:[],unread_counts:[],latest_message_ids:[],sender_ids:[],sender_names:[],from_me_flags:[],mentioned_ids:[],shapes:[]};
+      const facts={video_ids:[],links:[],message_ids:[],conversation_ids:[],conversation_types:[],conversation_names:[],unread_counts:[],latest_message_ids:[],sender_ids:[],sender_names:[],from_me_flags:[],mentioned_ids:[],comment_shares:[],parsed_contents:[],shapes:[]};
       const seen=new WeakSet();let budget=1500;
       const walk=(value,depth,label='')=>{
         if(!value||typeof value!=='object'||depth>9||--budget<0||seen.has(value))return;
@@ -44,6 +51,26 @@ export function readChatDOM({debug=false,conversations_only=false}={}) {
         if(senderID!=null&&String(senderID))facts.sender_ids.push(String(senderID));
         const senderName=sender?.nickname??sender?.nick_name??sender?.name;
         if(typeof senderName==='string'&&senderName)facts.sender_names.push(senderName);
+        if(label==='parsedContent'&&facts.parsed_contents.length<4){
+          try{facts.parsed_contents.push(JSON.parse(JSON.stringify(value)));}catch{}
+        }
+        if((value.comment_id!=null||value.comment_user_name!=null||value.comment!=null)&&facts.comment_shares.length<2){
+          facts.comment_shares.push({
+            comment_id:String(value.comment_id||''),
+            comment_user_name:String(value.comment_user_name||''),
+            comment:typeof value.comment==='string'?value.comment:JSON.stringify(value.comment||''),
+            comment_content_type:value.comment_content_type??null,
+            comment_url:value.comment_url||null,
+            content_thumb:value.content_thumb||null,
+            cover_url:value.cover_url||null,
+            aweme_title:String(value.aweme_title||''),
+            item_id:String(value.itemId||value.item_id||''),
+            media_type:value.media_type??null,
+            awe_type:value.aweType??null,
+            audio_duration:value.audio_duration??null,
+            msg_hint:String(value.msgHint||'')
+          });
+        }
         if(debug&&facts.shapes.length<24)
           {let proto=Object.getPrototypeOf(value),inherited=[];
             for(let i=0;i<4&&proto;i++,proto=Object.getPrototypeOf(proto))inherited.push(...Object.getOwnPropertyNames(proto));
@@ -83,7 +110,6 @@ export function readChatDOM({debug=false,conversations_only=false}={}) {
       const name=facts.conversation_names[0]||node.querySelector('[class$="title"],[class*="nickname"],[class*="NickName"],[class*="Name"],[class*="name"]')?.textContent?.trim()
         ||node.innerText?.trim().split('\n').find(Boolean)||'';
       return {index,name,conversation_id:facts.conversation_ids[0]||'',conversation_type:facts.conversation_types[0]||null,
-        link:node.querySelector('a[href*="/user/"]')?.href||'',avatar:node.querySelector('img')?.src||'',
         unread_count:facts.unread_counts.length?facts.unread_counts[0]:null,latest_message_id:facts.latest_message_ids[0]||'',
         activation_event:Object.keys(node).filter(key=>key.startsWith('__reactProps')).some(key=>typeof node[key]?.onMouseDown==='function')?'mousedown':'click',
         ...(debug?{facts,node:brief(node)}: {})};
@@ -124,26 +150,64 @@ export function readChatDOM({debug=false,conversations_only=false}={}) {
       const ownCSS=/isFromMe/i.test(String(box.className))||!!box.querySelector('[class*="isFromMe"],[class*="IsFromMe"]');
       const own=ownCSS||(!ownClass&&facts.from_me_flags.length>0&&facts.from_me_flags.every(Boolean));
       const textElement=box.querySelector('[class*="pureText"],[class*="textInnerContent"],[class*="bubbleContent"],[data-e2e="msg-item-content"]');
-      const text=(textElement?.innerText || box.innerText || '').replace(/[\u200b\ufeff]/g,'').trim();
+      const timeText=(box.querySelector('[class*="TimeLayout"],[class*="timeLayout"]')?.innerText||'').trim();
+      let rawText=textElement ? (textElement.innerText||'') : (box.innerText||'');
+      if(!textElement && timeText && rawText.startsWith(timeText)) rawText=rawText.slice(timeText.length);
+      const text=rawText.replace(/[\u200b\ufeff]/g,'').trim();
       const links=[...new Set([...box.querySelectorAll('a[href]')].map(x=>x.href).filter(x=>/douyin\.com|iesdouyin\.com/.test(x)).concat(facts.links,facts.video_ids.map(id=>'https://www.douyin.com/video/'+id)))];
       const images=[...box.querySelectorAll('img')].filter(x=>!x.closest('[class*="avatar"],[class*="Avatar"],[class*="ContentBottomHasRead"]')).map(x=>x.src).slice(0,4);
-      const video=links.some(x=>/\/(?:video|note)\/|\/share\/(?:video|note)\/|v\.douyin\.com/.test(x))||!!box.querySelector('[class*="videoMessage"],[class*="VideoMessage"],[data-e2e*="video"]');
+      // 分享卡片区分视频与图文：note 是图文作品，不能当视频处理。
+      // 卡片本身有 video 标记才是视频；只有 note 链接或图片栅格的是图文。
+      const hasVideoMark=box.matches('[class*="videoMessage"],[class*="VideoMessage"],[data-e2e*="video"]')||!!box.querySelector('[class*="videoMessage"],[class*="VideoMessage"],[data-e2e*="video"],video');
+      const noteLink=links.some(x=>/\/note\/|\/share\/note\//.test(x));
+      const videoLink=links.some(x=>/\/video\/|\/share\/video\/|v\.douyin\.com/.test(x));
+      const video=hasVideoMark||videoLink;
       const id=box.getAttribute('data-message-id')||box.getAttribute('data-msg-id')||facts.message_ids[0]||'';
       const memberLink=box.querySelector('[class*="avatar"] a[href*="/user/"],[class*="Avatar"] a[href*="/user/"],a[href*="/user/"]')?.href||'';
-      const memberName=facts.sender_names[0]||box.querySelector('[class*="avatarName"],[class*="nickname"],[class*="NickName"],[class*="senderName"],[class*="SenderName"],[class*="userName"],[class*="UserName"]')?.textContent?.trim()||'';
+      const rawMemberName=facts.sender_names[0]||box.querySelector('[class*="avatarName"],[class*="nickname"],[class*="NickName"],[class*="senderName"],[class*="SenderName"],[class*="userName"],[class*="UserName"]')?.textContent?.trim()||'';
+      const identity=cleanMemberName(rawMemberName);
+      const memberName=identity.name;
+      const memberRoleTitle=identity.role_title;
       const memberAvatar=box.querySelector('[class*="avatar"] img,[class*="Avatar"] img')?.src||'';
       const memberID=facts.sender_ids[0]||memberLink||(memberName&&memberAvatar?'visible:'+memberName+'|'+memberAvatar.split('?')[0]:'');
       const index=Number(box.getAttribute('data-index'));
       box.setAttribute('data-mimi-dm-position',String(position));
       return {native_id:id,index:Number.isFinite(index)?index:position,position,sender:own?'me':'peer',
-        text,links,images,kind:video?'video':images.length&&!text?'image':'text',
-        sender_id:memberID,sender_name:memberName,member_avatar:memberAvatar,mentioned_ids:facts.mentioned_ids,direction_known:facts.from_me_flags.length>0,
+        text,links,images,kind:video?'video':noteLink?'note':images.length&&!text?'image':'text',
+        sender_id:memberID,sender_name:memberName,role_title:memberRoleTitle,member_avatar:memberAvatar,mentioned_ids:facts.mentioned_ids,direction_known:facts.from_me_flags.length>0,
         className:String(box.className),failed:!!box.querySelector('[class*="sendFail"],[class*="SendFail"]'),
         pending:!!box.querySelector('[class*="sending"],[class*="Sending"]'),
-        ...(debug?{prop_shapes:facts.shapes,direction_flags:facts.from_me_flags,
+        comment_share:(()=>{
+          let cs=facts.comment_shares[0]||null;
+          const card=box.querySelector('[class*="CommentSharecardInner"],[class*="CommentSharecontainer"]');
+          if(!card && !cs)return null;
+          const domAuthor=(box.querySelector('[class*="CommentSharetitleName"]')?.innerText||'').trim();
+          const domCommentEl=box.querySelector('[class*="CommentSharecommentText"]');
+          const domCommentText=(domCommentEl?.innerText||domCommentEl?.textContent||'').replace(/[\u200b\ufeff]/g,'').trim();
+          const domCoverImg=box.querySelector('[class*="CommentSharecommentCover"] img, img[class*="CommentSharecommentCover"]')?.src||'';
+          const domAwemeText=(box.querySelector('[class*="CommentShareawemeSection"]')?.innerText||'').replace(/[\u200b\ufeff]/g,'').replace(/^来自(?:视频|图文)\s*/,'').trim();
+          const isBigEmoji=!!box.querySelector('[class*="bigEmojiCoverWrapper"]');
+          const propComment=(cs?.comment||'').trim();
+          const finalComment=(propComment && propComment!=='当前评论不可见') ? propComment : (domCommentText!=='当前评论不可见' ? domCommentText : '');
+          const urlList=cs?.comment_url?.url_list;
+          const mediaUrl=(Array.isArray(urlList)&&urlList[0]) || (typeof cs?.comment_url==='string'?cs.comment_url:'') || '';
+          return {
+            comment_id:cs?.comment_id||'',
+            author:cs?.comment_user_name||domAuthor||'',
+            text:finalComment,
+            content_type:cs?.comment_content_type||(isBigEmoji?3:(mediaUrl?2:1)),
+            media_url:mediaUrl,
+            dom_cover_img:domCoverImg,
+            is_emoji:isBigEmoji||(cs?.comment_content_type===3),
+            audio_duration:cs?.audio_duration||0,
+            aweme_id:cs?.item_id||'',
+            aweme_title:cs?.aweme_title||domAwemeText||''
+          };
+        })(),
+        ...(debug?{parsed_contents:facts.parsed_contents,prop_shapes:facts.shapes,direction_flags:facts.from_me_flags,
           observed_message_ids:facts.message_ids,
           css_from_me:/isFromMe/i.test(String(box.className))||!!box.querySelector('[class*="isFromMe"],[class*="IsFromMe"]')}: {})};
-    }).filter(x=>x&&(x.text||x.links.length||x.images.length));
+    }).filter(x=>x&&(x.kind==='video'||x.kind==='note'||x.text||x.links.length||x.images.length));
     if(raw.every(x=>x.hasAttribute('data-index')))items.sort((a,b)=>b.index-a.index);
     let diagnostics;
     if(debug) {
@@ -156,6 +220,41 @@ export function readChatDOM({debug=false,conversations_only=false}={}) {
         send_controls:[...root.querySelectorAll('button,[role="button"],[class*="send"],[class*="Send"]')].filter(visible).slice(-15).map(x=>({tag:x.tagName,className:String(x.className),text:x.innerText?.slice(0,80),attrs:Object.fromEntries([...x.attributes].filter(a=>a.name!=='style').map(a=>[a.name,a.value]))})),
         navigation:[...document.querySelectorAll('[data-e2e]')].filter(x=>/im-|message/.test(x.getAttribute('data-e2e'))).slice(0,8).map(x=>({tag:x.tagName,className:String(x.className),parent_class:String(x.parentElement.className),'data-e2e':x.getAttribute('data-e2e')})),
         conversations:[...document.querySelectorAll('.conversationConversationItemwrapper')].filter(visible).slice(0,8).map(x=>({className:String(x.className),name:x.querySelector('[class*="name"],[class*="Name"]')?.textContent?.trim(),attrs:Object.fromEntries([...x.attributes].map(a=>[a.name,a.value]))})),
+        upload_fibers:(()=>{
+          const inp=document.querySelector('.MsgInputFileUploadim-saas-fileUploader input[type=file]')||document.querySelector('input[type=file]');
+          if(!inp)return [];
+          const fk=Object.keys(inp).find(k=>k.startsWith('__reactFiber'));
+          if(!fk)return [];
+          let f=inp[fk];const out=[];let g=0;
+          while(f&&g++<12){
+            const p=f.memoizedProps||{};
+            const s=f.stateNode;
+            const fnKeys=Object.keys(p).filter(k=>typeof p[k]==='function');
+            const valKeys=Object.keys(p).filter(k=>typeof p[k]!=='function'&&k!=='children');
+            const fnd=s?.foundation?Object.getOwnPropertyNames(Object.getPrototypeOf(s.foundation)):[];
+            out.push({g,fnKeys,valKeys,fnd,onChangeStr:p.onChange?String(p.onChange).slice(0,220):null,beforeUploadStr:p.beforeUpload?String(p.beforeUpload).slice(0,220):null,onFileChangeStr:p.onFileChange?String(p.onFileChange).slice(0,1200):null,
+            handleChangeStr:s?.foundation?.handleChange?String(s.foundation.handleChange).slice(0,600):null,
+            modals:[...document.querySelectorAll('[class*="modal"],[class*="Modal"],[class*="dialog"],[class*="Dialog"],[class*="Upload"],[class*="upload"],button,[role="button"]')].filter(visible).map(x=>({tag:x.tagName,cls:String(x.className||'').slice(0,80),txt:(x.innerText||'').trim().slice(0,80)})).filter(x=>x.txt||/upload|modal|send|confirm/i.test(x.cls)).slice(-25)});
+            f=f.return;
+          }
+          return out;
+        })(),
+        last_message_html:(()=>{
+          const boxes=[...root.querySelectorAll('[data-message-id],[data-msg-id],div[data-index]')]
+            .filter(x=>visible(x)&&!x.parentElement?.closest('[data-message-id],[data-msg-id],div[data-index]'));
+          const tail=boxes.slice(-2);
+          return tail.map(b=>({
+            id:b.getAttribute('data-message-id')||b.getAttribute('data-msg-id')||'',
+            className:String(b.className),
+            hasVideo:!!b.querySelector('video'),
+            videoSrc:(b.querySelector('video')?.src||'').slice(0,80),
+            audioCount:b.querySelectorAll('audio').length,
+            fileish:[...b.querySelectorAll('[class*="File"],[class*="file"],[class*="Video"],[class*="video"],[class*="Audio"],[class*="audio"]')]
+              .map(n=>String(n.className).slice(0,60)).slice(0,8),
+            text:(b.innerText||'').replace(/\u200b/g,'').trim().slice(0,120),
+            html:b.outerHTML.slice(0,1200)
+          }));
+        })(),
         root:root.tagName,root_class:root.className};
     }
     // The web client exposes IM conversation type (1=private, 2=group).
@@ -169,5 +268,7 @@ export function readChatDOM({debug=false,conversations_only=false}={}) {
     }
     return {ready:true,peer:{name:peerName,link:group?'':peerLink,avatar,conversation_id:conversationID,
         conversation_type:group?'group':'private',self_user_id:selfUserID,self_user_name:selfUserName},conversations,
-      direction_proven:ownClass||items.some(item=>item.direction_known),items,editor_class:editor.className,root_class:root.className,diagnostics};
+      // 私信只有一个对话对象；方向标记常常未暴露在 DOM/React 数据里。
+      // 群聊仍必须观察到我方消息或明确方向字段，避免混淆群聊成员。
+      direction_proven:!group||ownClass||items.some(item=>item.direction_known),items,editor_class:editor.className,root_class:root.className,diagnostics};
 }

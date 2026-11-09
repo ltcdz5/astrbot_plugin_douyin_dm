@@ -26,7 +26,14 @@ export async function resolveSharedPost(args,environment) {
   const hint=args.message_hint||{};
   // Only the original inbound share can supply this fallback. Never pick the
   // newest card or match a publisher nickname when an old key disappears.
-  const captured=hint.sender==='peer'&&hint.kind==='video'?postLink(hint,siteHost):'';
+  const explicit=args.link||args.url;
+  const direct=explicit?postLink({links:[explicit]},siteHost):'';
+  if(explicit&&!direct)throw new Error('作品来源不受支持。');
+  const captured=hint.sender==='peer'&&['video','note'].includes(hint.kind)?postLink(hint,siteHost):'';
+  if(direct&&captured&&postIdentity(direct)&&postIdentity(captured)&&postIdentity(direct)!==postIdentity(captured))
+    throw new Error('分享作品标识不一致，没有读取其他作品。');
+  // A captured inbound share is immutable; never depend on the currently visible chat.
+  if(direct||captured)return {url:direct||captured,matched_by:'captured_share_link',attempts:0};
   let lastError='未找到这条对方分享的作品。';
   for(let attempt=1;attempt<=3;attempt++) {
     const before=await snapshot();
